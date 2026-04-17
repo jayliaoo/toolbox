@@ -168,8 +168,8 @@ function UrlPage() {
 	);
 }
 
-type HashAlgo = "MD5" | "SHA-1" | "SHA-224" | "SHA-256" | "SHA-384" | "SHA-512" | "SHA-512/224" | "SHA-512/256" | "SHA3-256" | "SHA3-512" | "SHA3-512/224" | "SHA3-512/256";
-const HASH_ALGOS: HashAlgo[] = ["MD5", "SHA-1", "SHA-224", "SHA-256", "SHA-384", "SHA-512", "SHA-512/224", "SHA-512/256", "SHA3-256", "SHA3-512", "SHA3-512/224", "SHA3-512/256"];
+type HashAlgo = "MD5" | "SHA-1" | "SHA-224" | "SHA-256" | "SHA-384" | "SHA-512" | "SHA3-256" | "SHA3-384" | "SHA3-512";
+const HASH_ALGOS: HashAlgo[] = ["MD5", "SHA-1", "SHA-224", "SHA-256", "SHA-384", "SHA-512", "SHA3-256", "SHA3-384", "SHA3-512"];
 
 function HashPage() {
 	const [input, setInput] = useState("");
@@ -198,23 +198,14 @@ function HashPage() {
 				case "SHA-224":
 					hash = sha224(data);
 					break;
-				case "SHA-512/224":
-					hash = sha512t(data, 224);
-					break;
-				case "SHA-512/256":
-					hash = sha512t(data, 256);
-					break;
 				case "SHA3-256":
 					hash = sha3(data, 256);
 					break;
+				case "SHA3-384":
+					hash = sha3(data, 384);
+					break;
 				case "SHA3-512":
 					hash = sha3(data, 512);
-					break;
-				case "SHA3-512/224":
-					hash = sha3(data, 512).slice(0, 56);
-					break;
-				case "SHA3-512/256":
-					hash = sha3(data, 512).slice(0, 64);
 					break;
 			}
 			setResult(hash);
