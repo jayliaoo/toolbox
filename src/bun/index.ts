@@ -4,7 +4,7 @@ import type { AppRPC } from "../shared/types";
 ApplicationMenu.setApplicationMenu([
 	{
 		label: "App",
-		submenu: [{ label: "Quit", role: "quit", accelerator: "CmdOrCtrl+W" }],
+		submenu: [{ label: "Quit", role: "quit", accelerator: "CmdOrCtrl+Q" }],
 	},
 	{
 		label: "Edit",
