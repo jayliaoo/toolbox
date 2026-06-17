@@ -9,9 +9,10 @@
 - **Base32 编码/解码**：RFC 4648 标准实现
 - **Hex 编码/解码**：文本与十六进制互转
 - **URL 编码/解码**：encodeURIComponent / decodeURIComponent
-- **哈希计算**：支持 MD5、SHA-1、SHA-224、SHA-256、SHA-384、SHA-512、SHA-512/224、SHA-512/256、SHA3-256、SHA3-512、SHA3-512/224、SHA3-512/256
+- **哈希计算**：支持 MD5、SHA-1、SHA-224、SHA-256、SHA-384、SHA-512、SHA3-256、SHA3-384、SHA3-512
 - **JWT 解析**：解析 JWT Token 的 Header 和 Payload
 - **二维码**：生成二维码、从图片解析二维码、保存到下载目录
+- **随机密钥**：生成 128/192/256 bit 随机密钥，支持 hex/base32/base64 格式
 
 ## 安装
 
@@ -28,8 +29,11 @@ bun run dev:hmr
 # 开发模式（不支持热更新，使用打包后的资源）
 bun run dev
 
-# 构建生产版本
-bun run build
+# 构建生产版本（canary 渠道）
+bun run build:canary
+
+# 构建生产版本（stable 渠道）
+bun run build:stable
 ```
 
 ## 项目结构
@@ -65,14 +69,18 @@ bun run build
 
 - **Cmd+C / Cmd+V / Cmd+X**：复制 / 粘贴 / 剪切
 - **Cmd+Z / Cmd+Shift+Z**：撤销 / 重做
+- **Cmd+Q**：退出应用
+- **Cmd+W**：关闭窗口并退出应用
 
 ## 构建发布
 
 ```bash
-# 构建当前平台
-bunx electrobun build
+# 构建生产版本（推荐）
+bun run build:canary    # canary 渠道
+bun run build:stable    # stable 渠道
 
-# 构建指定平台
+# 或直接调用 electrobun
+bunx electrobun build   # 构建当前平台
 bunx electrobun build --targets macos-arm64,macos-x64,win-x64,linux-x64
 ```
 
