@@ -3,7 +3,7 @@ import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { saveFile } from "./rpc";
 
-type Tool = "uuid" | "base64" | "url" | "jwt" | "hash" | "base32" | "hex" | "qrcode";
+type Tool = "uuid" | "base64" | "url" | "jwt" | "hash" | "base32" | "hex" | "qrcode" | "randomkey";
 
 const tools: { id: Tool; icon: string; title: string; desc: string }[] = [
 	{ id: "uuid", icon: "🔑", title: "UUID 生成", desc: "UUID v4 / v7" },
@@ -14,6 +14,7 @@ const tools: { id: Tool; icon: string; title: string; desc: string }[] = [
 	{ id: "hash", icon: "🧬", title: "哈希计算", desc: "MD5 / SHA-1 / SHA-2 / SHA-3" },
 	{ id: "jwt", icon: "🪪", title: "JWT 解析", desc: "解析 JWT Token 结构" },
 	{ id: "qrcode", icon: "📱", title: "二维码", desc: "生成与解析二维码" },
+	{ id: "randomkey", icon: "🎲", title: "随机密钥", desc: "生成随机密钥 (128/192/256 bit)" },
 ];
 
 // ---- Helpers ----
@@ -84,12 +85,48 @@ function ResultBox({ value }: { value: string }) {
 // ---- Tool Pages ----
 function UuidPage() {
 	const [uuid, setUuid] = useState("");
-	const [isV7, setIsV7] = useState(false);
 	return (
 		<div>
-			<Toggle left="v4" right="v7" value={isV7} onChange={setIsV7} />
-			<button onClick={() => setUuid(isV7 ? uuidv7() : crypto.randomUUID())} className="btn-primary w-full mb-4">生成 UUID {isV7 ? "v7" : "v4"}</button>
+			<div className="flex gap-2 mb-4">
+				<button onClick={() => setUuid(crypto.randomUUID())} className="btn-primary flex-1">UUID v4</button>
+				<button onClick={() => setUuid(uuidv7())} className="btn-primary flex-1">UUID v7</button>
+			</div>
 			{uuid && <ResultBox value={uuid} />}
+		</div>
+	);
+}
+
+function RandomKeyPage() {
+	const [bits, setBits] = useState<128 | 192 | 256>(128);
+	const [format, setFormat] = useState<"hex" | "base32" | "base64">("hex");
+	const [result, setResult] = useState("");
+	const generate = () => {
+		const bytes = new Uint8Array(bits / 8);
+		crypto.getRandomValues(bytes);
+		if (format === "hex") setResult(bytesToHex(bytes));
+		else if (format === "base32") setResult(base32Encode(bytes));
+		else setResult(btoa(String.fromCharCode(...bytes)));
+	};
+	return (
+		<div>
+			<div className="mb-3">
+				<p className="text-xs text-gray-400 mb-1">长度</p>
+				<div className="flex gap-2">
+					{([128, 192, 256] as const).map((b) => (
+						<button key={b} onClick={() => setBits(b)} className={`flex-1 py-1.5 rounded-lg text-sm transition-colors ${bits === b ? "bg-indigo-500 text-white" : "bg-white/10 text-gray-300 hover:bg-white/20"}`}>{b} bit</button>
+					))}
+				</div>
+			</div>
+			<div className="mb-4">
+				<p className="text-xs text-gray-400 mb-1">格式</p>
+				<div className="flex gap-2">
+					{(["hex", "base32", "base64"] as const).map((f) => (
+						<button key={f} onClick={() => setFormat(f)} className={`flex-1 py-1.5 rounded-lg text-sm transition-colors ${format === f ? "bg-indigo-500 text-white" : "bg-white/10 text-gray-300 hover:bg-white/20"}`}>{f}</button>
+					))}
+				</div>
+			</div>
+			<button onClick={generate} className="btn-primary w-full mb-4">生成密钥</button>
+			{result && <ResultBox value={result} />}
 		</div>
 	);
 }
@@ -97,27 +134,29 @@ function UuidPage() {
 function Base64Page() {
 	const [input, setInput] = useState("");
 	const [output, setOutput] = useState("");
-	const [isDecode, setIsDecode] = useState(false);
 	const [isUrlSafe, setIsUrlSafe] = useState(false);
-	const run = () => {
+	const encode = () => {
 		try {
-			if (!isDecode) {
-				let r = btoa(unescape(encodeURIComponent(input)));
-				if (isUrlSafe) r = r.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-				setOutput(r);
-			} else {
-				let b = input;
-				if (isUrlSafe) { b = b.replace(/-/g, "+").replace(/_/g, "/"); while (b.length % 4 !== 0) b += "="; }
-				setOutput(decodeURIComponent(escape(atob(b))));
-			}
+			let r = btoa(unescape(encodeURIComponent(input)));
+			if (isUrlSafe) r = r.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+			setOutput(r);
+		} catch { setOutput("⚠️ 无效输入"); }
+	};
+	const decode = () => {
+		try {
+			let b = input;
+			if (isUrlSafe) { b = b.replace(/-/g, "+").replace(/_/g, "/"); while (b.length % 4 !== 0) b += "="; }
+			setOutput(decodeURIComponent(escape(atob(b))));
 		} catch { setOutput("⚠️ 无效输入"); }
 	};
 	return (
 		<div>
 			<Toggle left="标准版" right="URL 安全版" value={isUrlSafe} onChange={setIsUrlSafe} />
-			<Toggle left="编码" right="解码" value={isDecode} onChange={setIsDecode} />
 			<textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="输入文本..." className="input-area" rows={4} />
-			<button onClick={run} className="btn-primary w-full my-4">转换</button>
+			<div className="flex gap-2 my-4">
+				<button onClick={encode} className="btn-primary flex-1">编码</button>
+				<button onClick={decode} className="btn-primary flex-1">解码</button>
+			</div>
 			{output && <ResultBox value={output} />}
 		</div>
 	);
@@ -126,13 +165,15 @@ function Base64Page() {
 function Base32Page() {
 	const [input, setInput] = useState("");
 	const [output, setOutput] = useState("");
-	const [isDecode, setIsDecode] = useState(false);
-	const run = () => { try { setOutput(isDecode ? bytesToStr(base32Decode(input)) : base32Encode(strToBytes(input))); } catch { setOutput("⚠️ 无效输入"); } };
+	const encode = () => { try { setOutput(base32Encode(strToBytes(input))); } catch { setOutput("⚠️ 无效输入"); } };
+	const decode = () => { try { setOutput(bytesToStr(base32Decode(input))); } catch { setOutput("⚠️ 无效输入"); } };
 	return (
 		<div>
-			<Toggle left="编码" right="解码" value={isDecode} onChange={setIsDecode} />
 			<textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="输入文本..." className="input-area" rows={4} />
-			<button onClick={run} className="btn-primary w-full my-4">转换</button>
+			<div className="flex gap-2 my-4">
+				<button onClick={encode} className="btn-primary flex-1">编码</button>
+				<button onClick={decode} className="btn-primary flex-1">解码</button>
+			</div>
 			{output && <ResultBox value={output} />}
 		</div>
 	);
@@ -141,13 +182,15 @@ function Base32Page() {
 function HexPage() {
 	const [input, setInput] = useState("");
 	const [output, setOutput] = useState("");
-	const [isDecode, setIsDecode] = useState(false);
-	const run = () => { try { setOutput(isDecode ? bytesToStr(hexToBytes(input)) : bytesToHex(strToBytes(input))); } catch (e: any) { setOutput(`⚠️ ${e.message || "无效输入"}`); } };
+	const encode = () => { try { setOutput(bytesToHex(strToBytes(input))); } catch (e: any) { setOutput(`⚠️ ${e.message || "无效输入"}`); } };
+	const decode = () => { try { setOutput(bytesToStr(hexToBytes(input))); } catch (e: any) { setOutput(`⚠️ ${e.message || "无效输入"}`); } };
 	return (
 		<div>
-			<Toggle left="编码" right="解码" value={isDecode} onChange={setIsDecode} />
-			<textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder={isDecode ? "输入十六进制..." : "输入文本..."} className="input-area" rows={4} />
-			<button onClick={run} className="btn-primary w-full my-4">转换</button>
+			<textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="输入文本..." className="input-area" rows={4} />
+			<div className="flex gap-2 my-4">
+				<button onClick={encode} className="btn-primary flex-1">编码</button>
+				<button onClick={decode} className="btn-primary flex-1">解码</button>
+			</div>
 			{output && <ResultBox value={output} />}
 		</div>
 	);
@@ -156,13 +199,15 @@ function HexPage() {
 function UrlPage() {
 	const [input, setInput] = useState("");
 	const [output, setOutput] = useState("");
-	const [isDecode, setIsDecode] = useState(false);
-	const run = () => { try { setOutput(isDecode ? decodeURIComponent(input) : encodeURIComponent(input)); } catch { setOutput("⚠️ 无效输入"); } };
+	const encode = () => { try { setOutput(encodeURIComponent(input)); } catch { setOutput("⚠️ 无效输入"); } };
+	const decode = () => { try { setOutput(decodeURIComponent(input)); } catch { setOutput("⚠️ 无效输入"); } };
 	return (
 		<div>
-			<Toggle left="编码" right="解码" value={isDecode} onChange={setIsDecode} />
 			<textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="输入文本..." className="input-area" rows={4} />
-			<button onClick={run} className="btn-primary w-full my-4">转换</button>
+			<div className="flex gap-2 my-4">
+				<button onClick={encode} className="btn-primary flex-1">编码</button>
+				<button onClick={decode} className="btn-primary flex-1">解码</button>
+			</div>
 			{output && <ResultBox value={output} />}
 		</div>
 	);
@@ -500,7 +545,7 @@ function sha3(data: Uint8Array, bits: number): string {
 }
 
 // ---- Page Map & App ----
-const pageMap: Record<Tool, () => JSX.Element> = { uuid: UuidPage, base64: Base64Page, base32: Base32Page, hex: HexPage, url: UrlPage, hash: HashPage, jwt: JwtPage, qrcode: QrCodePage };
+const pageMap: Record<Tool, () => JSX.Element> = { uuid: UuidPage, base64: Base64Page, base32: Base32Page, hex: HexPage, url: UrlPage, hash: HashPage, jwt: JwtPage, qrcode: QrCodePage, randomkey: RandomKeyPage };
 
 function App() {
 	const [active, setActive] = useState<Tool | null>(null);
