@@ -3,7 +3,7 @@ import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { saveFile } from "./rpc";
 
-type Tool = "uuid" | "base64" | "url" | "jwt" | "hash" | "base32" | "hex" | "qrcode" | "randomkey";
+type Tool = "uuid" | "base64" | "url" | "jwt" | "hash" | "base32" | "hex" | "qrcode" | "randomkey" | "aes";
 
 const tools: { id: Tool; icon: string; title: string; desc: string }[] = [
 	{ id: "uuid", icon: "🔑", title: "UUID 生成", desc: "UUID v4 / v7" },
@@ -15,13 +15,25 @@ const tools: { id: Tool; icon: string; title: string; desc: string }[] = [
 	{ id: "jwt", icon: "🪪", title: "JWT 解析", desc: "解析 JWT Token 结构" },
 	{ id: "qrcode", icon: "📱", title: "二维码", desc: "生成与解析二维码" },
 	{ id: "randomkey", icon: "🎲", title: "随机密钥", desc: "生成随机密钥 (128/192/256 bit)" },
+	{ id: "aes", icon: "🔐", title: "AES 加密/解密", desc: "AES-128/192/256 · ECB/CBC/GCM/CTR" },
 ];
 
 // ---- Helpers ----
-function strToBytes(s: string): Uint8Array { return new TextEncoder().encode(s); }
+function strToBytes(s: string): Uint8Array<ArrayBuffer> { return new TextEncoder().encode(s); }
 function bytesToStr(b: Uint8Array): string { return new TextDecoder().decode(b); }
 function bytesToHex(b: Uint8Array): string { return Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join(""); }
-function hexToBytes(hex: string): Uint8Array {
+function bytesToBase64(b: Uint8Array): string {
+	let s = "";
+	for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000));
+	return btoa(s);
+}
+function base64ToBytes(s: string): Uint8Array<ArrayBuffer> {
+	const bin = atob(s.trim().replace(/-/g, "+").replace(/_/g, "/"));
+	const b = new Uint8Array(bin.length);
+	for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+	return b;
+}
+function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
 	const c = hex.replace(/\s/g, "");
 	if (c.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(c)) throw new Error("无效的十六进制字符串");
 	const b = new Uint8Array(c.length / 2);
@@ -386,6 +398,361 @@ function QrCodePage() {
 	);
 }
 
+// ---- AES (WebCrypto) ----
+type AesVariant = "AES-ECB" | "AES-CBC" | "AES-GCM" | "AES-CTR";
+type AesBits = 128 | 192 | 256;
+type KeyFormat = "utf8" | "base64" | "hex";
+type DataFormat = "text" | "base64" | "hex";
+
+const AES_IV_LEN: Partial<Record<AesVariant, number>> = { "AES-CBC": 16, "AES-GCM": 12, "AES-CTR": 16 };
+
+function aesParams(variant: AesVariant, iv: Uint8Array<ArrayBuffer>): AesCbcParams | AesGcmParams | AesCtrParams {
+	if (variant === "AES-GCM") return { name: "AES-GCM", iv, tagLength: 128 };
+	if (variant === "AES-CTR") return { name: "AES-CTR", counter: iv, length: 128 };
+	return { name: "AES-CBC", iv };
+}
+
+function parseAesKey(s: string, bits: AesBits, format: KeyFormat): Uint8Array<ArrayBuffer> {
+	let key: Uint8Array<ArrayBuffer>;
+	if (format === "utf8") key = strToBytes(s);
+	else if (format === "base64") key = base64ToBytes(s);
+	else key = hexToBytes(s);
+	if (key.length !== bits / 8) throw new Error(`密钥长度需为 ${bits} bit / ${bits / 8} 字节（当前 ${key.length} 字节）`);
+	return key;
+}
+
+// 按格式解码二进制（密钥/IV/明文的通用输入解码）
+function decodeByFmt(s: string, fmt: KeyFormat | DataFormat): Uint8Array<ArrayBuffer> {
+	if (fmt === "utf8" || fmt === "text") return strToBytes(s);
+	if (fmt === "base64") return base64ToBytes(s);
+	return hexToBytes(s);
+}
+
+// 生成恰好 length 个字节的 A-Z a-z 0-9 随机字符串（用于 utf8 格式的密钥/IV）
+function randomAlnum(length: number): string {
+	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+	const r = new Uint32Array(length);
+	crypto.getRandomValues(r);
+	let s = "";
+	for (let i = 0; i < length; i++) s += chars[r[i] % chars.length];
+	return s;
+}
+
+// ---- AES block cipher (pure JS): WebCrypto omits ECB, so implement the primitive ----
+const AES_SBOX = new Uint8Array([
+	0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+	0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+	0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+	0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+	0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+	0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+	0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+	0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+	0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+	0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+	0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+	0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+	0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+	0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+	0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+	0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
+]);
+const AES_INV_SBOX = new Uint8Array([
+	0x52,0x09,0x6a,0xd5,0x30,0x36,0xa5,0x38,0xbf,0x40,0xa3,0x9e,0x81,0xf3,0xd7,0xfb,
+	0x7c,0xe3,0x39,0x82,0x9b,0x2f,0xff,0x87,0x34,0x8e,0x43,0x44,0xc4,0xde,0xe9,0xcb,
+	0x54,0x7b,0x94,0x32,0xa6,0xc2,0x23,0x3d,0xee,0x4c,0x95,0x0b,0x42,0xfa,0xc3,0x4e,
+	0x08,0x2e,0xa1,0x66,0x28,0xd9,0x24,0xb2,0x76,0x5b,0xa2,0x49,0x6d,0x8b,0xd1,0x25,
+	0x72,0xf8,0xf6,0x64,0x86,0x68,0x98,0x16,0xd4,0xa4,0x5c,0xcc,0x5d,0x65,0xb6,0x92,
+	0x6c,0x70,0x48,0x50,0xfd,0xed,0xb9,0xda,0x5e,0x15,0x46,0x57,0xa7,0x8d,0x9d,0x84,
+	0x90,0xd8,0xab,0x00,0x8c,0xbc,0xd3,0x0a,0xf7,0xe4,0x58,0x05,0xb8,0xb3,0x45,0x06,
+	0xd0,0x2c,0x1e,0x8f,0xca,0x3f,0x0f,0x02,0xc1,0xaf,0xbd,0x03,0x01,0x13,0x8a,0x6b,
+	0x3a,0x91,0x11,0x41,0x4f,0x67,0xdc,0xea,0x97,0xf2,0xcf,0xce,0xf0,0xb4,0xe6,0x73,
+	0x96,0xac,0x74,0x22,0xe7,0xad,0x35,0x85,0xe2,0xf9,0x37,0xe8,0x1c,0x75,0xdf,0x6e,
+	0x47,0xf1,0x1a,0x71,0x1d,0x29,0xc5,0x89,0x6f,0xb7,0x62,0x0e,0xaa,0x18,0xbe,0x1b,
+	0xfc,0x56,0x3e,0x4b,0xc6,0xd2,0x79,0x20,0x9a,0xdb,0xc0,0xfe,0x78,0xcd,0x5a,0xf4,
+	0x1f,0xdd,0xa8,0x33,0x88,0x07,0xc7,0x31,0xb1,0x12,0x10,0x59,0x27,0x80,0xec,0x5f,
+	0x60,0x51,0x7f,0xa9,0x19,0xb5,0x4a,0x0d,0x2d,0xe5,0x7a,0x9f,0x93,0xc9,0x9c,0xef,
+	0xa0,0xe0,0x3b,0x4d,0xae,0x2a,0xf5,0xb0,0xc8,0xeb,0xbb,0x3c,0x83,0x53,0x99,0x61,
+	0x17,0x2b,0x04,0x7e,0xba,0x77,0xd6,0x26,0xe1,0x69,0x14,0x63,0x55,0x21,0x0c,0x7d,
+]);
+const AES_RCON = [0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36];
+
+function aesKeyExpansion(key: Uint8Array): Uint32Array {
+	const Nk = key.length / 4;
+	const Nr = Nk + 6;
+	const w = new Uint32Array(4 * (Nr + 1));
+	for (let i = 0; i < Nk; i++) w[i] = (key[4*i]<<24)|(key[4*i+1]<<16)|(key[4*i+2]<<8)|key[4*i+3];
+	for (let i = Nk; i < w.length; i++) {
+		let t = w[i-1];
+		if (i % Nk === 0) {
+			t = (t<<8)|(t>>>24);
+			t = (AES_SBOX[(t>>>24)&255]<<24)|(AES_SBOX[(t>>>16)&255]<<16)|(AES_SBOX[(t>>>8)&255]<<8)|AES_SBOX[t&255];
+			t ^= AES_RCON[i/Nk - 1]<<24;
+		} else if (Nk > 6 && i % Nk === 4) {
+			t = (AES_SBOX[(t>>>24)&255]<<24)|(AES_SBOX[(t>>>16)&255]<<16)|(AES_SBOX[(t>>>8)&255]<<8)|AES_SBOX[t&255];
+		}
+		w[i] = w[i-Nk] ^ t;
+	}
+	return w;
+}
+
+function aesGmul(a: number, b: number): number {
+	let p = 0;
+	for (let i = 0; i < 8; i++) {
+		if (b & 1) p ^= a;
+		const hi = a & 0x80;
+		a = (a << 1) & 0xff;
+		if (hi) a ^= 0x1b;
+		b >>= 1;
+	}
+	return p;
+}
+
+// 单个 16 字节块加/解密，state 索引 r + 4c（列主序）
+function aesBlock(w: Uint32Array, Nr: number, encrypt: boolean, block: Uint8Array, off: number, state: Uint8Array) {
+	for (let i = 0; i < 16; i++) state[i] = block[off + i];
+	const addRK = (round: number) => {
+		for (let c = 0; c < 4; c++) {
+			const word = w[round*4+c];
+			state[4*c]   ^= (word>>>24)&255;
+			state[4*c+1] ^= (word>>>16)&255;
+			state[4*c+2] ^= (word>>>8)&255;
+			state[4*c+3] ^= word&255;
+		}
+	};
+	if (encrypt) {
+		addRK(0);
+		for (let round = 1; round < Nr; round++) {
+			for (let i = 0; i < 16; i++) state[i] = AES_SBOX[state[i]];
+			const prev = state.slice();
+			for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) state[r+4*c] = prev[r+4*((c+r)%4)];
+			for (let c = 0; c < 4; c++) {
+				const a0=state[4*c],a1=state[4*c+1],a2=state[4*c+2],a3=state[4*c+3];
+				state[4*c]   = aesGmul(a0,2)^aesGmul(a1,3)^a2^a3;
+				state[4*c+1] = a0^aesGmul(a1,2)^aesGmul(a2,3)^a3;
+				state[4*c+2] = a0^a1^aesGmul(a2,2)^aesGmul(a3,3);
+				state[4*c+3] = aesGmul(a0,3)^a1^a2^aesGmul(a3,2);
+			}
+			addRK(round);
+		}
+		for (let i = 0; i < 16; i++) state[i] = AES_SBOX[state[i]];
+		const prev = state.slice();
+		for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) state[r+4*c] = prev[r+4*((c+r)%4)];
+		addRK(Nr);
+	} else {
+		addRK(Nr);
+		for (let round = Nr-1; round >= 1; round--) {
+			const prev = state.slice();
+			for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) state[r+4*c] = prev[r+4*((c-r+4)%4)];
+			for (let i = 0; i < 16; i++) state[i] = AES_INV_SBOX[state[i]];
+			addRK(round);
+			for (let c = 0; c < 4; c++) {
+				const a0=state[4*c],a1=state[4*c+1],a2=state[4*c+2],a3=state[4*c+3];
+				state[4*c]   = aesGmul(a0,14)^aesGmul(a1,11)^aesGmul(a2,13)^aesGmul(a3,9);
+				state[4*c+1] = aesGmul(a0,9)^aesGmul(a1,14)^aesGmul(a2,11)^aesGmul(a3,13);
+				state[4*c+2] = aesGmul(a0,13)^aesGmul(a1,9)^aesGmul(a2,14)^aesGmul(a3,11);
+				state[4*c+3] = aesGmul(a0,11)^aesGmul(a1,13)^aesGmul(a2,9)^aesGmul(a3,14);
+			}
+		}
+		const prev = state.slice();
+		for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) state[r+4*c] = prev[r+4*((c-r+4)%4)];
+		for (let i = 0; i < 16; i++) state[i] = AES_INV_SBOX[state[i]];
+		addRK(0);
+	}
+}
+
+// ECB + PKCS#7
+function aesEcbEncrypt(key: Uint8Array, data: Uint8Array): Uint8Array<ArrayBuffer> {
+	const Nr = key.length / 4 + 6;
+	const w = aesKeyExpansion(key);
+	const state = new Uint8Array(16);
+	const pad = 16 - (data.length % 16);
+	const out = new Uint8Array(data.length + pad);
+	const padded = new Uint8Array(data.length + pad);
+	padded.set(data);
+	for (let i = data.length; i < padded.length; i++) padded[i] = pad;
+	for (let off = 0; off < padded.length; off += 16) {
+		aesBlock(w, Nr, true, padded, off, state);
+		out.set(state, off);
+	}
+	return out;
+}
+
+function aesEcbDecrypt(key: Uint8Array, data: Uint8Array): Uint8Array<ArrayBuffer> {
+	if (data.length === 0 || data.length % 16 !== 0) throw new Error("ECB 密文长度必须为 16 字节的整数倍");
+	const Nr = key.length / 4 + 6;
+	const w = aesKeyExpansion(key);
+	const state = new Uint8Array(16);
+	const out = new Uint8Array(data.length);
+	for (let off = 0; off < data.length; off += 16) {
+		aesBlock(w, Nr, false, data, off, state);
+		out.set(state, off);
+	}
+	const pad = out[out.length - 1];
+	if (pad < 1 || pad > 16) throw new Error("PKCS#7 填充无效：密钥错误或密文已损坏");
+	for (let i = out.length - pad; i < out.length; i++) {
+		if (out[i] !== pad) throw new Error("PKCS#7 填充无效：密钥错误或密文已损坏");
+	}
+	return out.slice(0, out.length - pad);
+}
+
+function AesPage() {
+	const [mode, setMode] = useState<"encrypt" | "decrypt">("encrypt");
+	const [variant, setVariant] = useState<AesVariant>("AES-CBC");
+	const [bits, setBits] = useState<AesBits>(256);
+	const [keyFmt, setKeyFmt] = useState<KeyFormat>("utf8");
+	const [outFmt, setOutFmt] = useState<DataFormat>("base64");
+	const [inFmt, setInFmt] = useState<DataFormat>("text");
+	const [keyText, setKeyText] = useState("");
+	const [ivText, setIvText] = useState("");
+	const [input, setInput] = useState("");
+	const [output, setOutput] = useState("");
+	const [error, setError] = useState("");
+	const [busy, setBusy] = useState(false);
+
+	const ivLen = variant === "AES-ECB" ? 0 : AES_IV_LEN[variant]!;
+	const isEcb = variant === "AES-ECB";
+	const segBtn = (active: boolean) => `flex-1 py-1.5 rounded-lg text-sm transition-colors ${active ? "bg-indigo-500 text-white" : "bg-white/10 text-gray-300 hover:bg-white/20"}`;
+
+	const genKey = () => {
+		if (keyFmt === "utf8") { setKeyText(randomAlnum(bits / 8)); return; }
+		const k = new Uint8Array(bits / 8);
+		crypto.getRandomValues(k);
+		setKeyText(keyFmt === "base64" ? bytesToBase64(k) : bytesToHex(k));
+	};
+	const genIv = () => {
+		if (ivLen === 0) return;
+		if (keyFmt === "utf8") { setIvText(randomAlnum(ivLen)); return; }
+		const iv = new Uint8Array(ivLen);
+		crypto.getRandomValues(iv);
+		setIvText(keyFmt === "base64" ? bytesToBase64(iv) : bytesToHex(iv));
+	};
+
+	const switchMode = (m: "encrypt" | "decrypt") => {
+		setMode(m);
+		if (m === "encrypt") setOutFmt((o) => (o === "text" ? "base64" : o));
+		else setInFmt((f) => (f === "text" ? "base64" : f));
+	};
+
+	const run = async () => {
+		setError(""); setOutput("");
+		setBusy(true);
+		try {
+			if (!keyText.trim()) throw new Error("请输入密钥");
+			if (!isEcb && !ivText.trim()) throw new Error("请输入 IV/Nonce，或点击「随机 IV」");
+			if (!input.trim()) throw new Error(mode === "encrypt" ? "请输入明文" : "请输入密文");
+			const rawKey = parseAesKey(keyText, bits, keyFmt);
+			if (mode === "encrypt") {
+				const plain = decodeByFmt(input, inFmt);
+				if (isEcb) {
+					const buf = aesEcbEncrypt(rawKey, plain);
+					setOutput(outFmt === "hex" ? bytesToHex(buf) : bytesToBase64(buf));
+				} else {
+					const iv = decodeByFmt(ivText, keyFmt);
+					if (iv.length !== ivLen) throw new Error(`IV/Nonce 需为 ${ivLen} 字节（当前 ${iv.length} 字节）`);
+					const cryptoKey = await crypto.subtle.importKey("raw", rawKey, variant, false, ["encrypt", "decrypt"]);
+					const buf = await crypto.subtle.encrypt(aesParams(variant, iv), cryptoKey, plain);
+					setOutput(outFmt === "hex" ? bytesToHex(new Uint8Array(buf)) : bytesToBase64(new Uint8Array(buf)));
+				}
+			} else {
+				const encodeOut = (pt: Uint8Array) => outFmt === "text" ? bytesToStr(pt) : outFmt === "hex" ? bytesToHex(pt) : bytesToBase64(pt);
+				const cipher = decodeByFmt(input, inFmt);
+				if (isEcb) {
+					setOutput(encodeOut(aesEcbDecrypt(rawKey, cipher)));
+				} else {
+					const iv = decodeByFmt(ivText, keyFmt);
+					if (iv.length !== ivLen) throw new Error(`IV/Nonce 需为 ${ivLen} 字节（当前 ${iv.length} 字节）`);
+					const cryptoKey = await crypto.subtle.importKey("raw", rawKey, variant, false, ["encrypt", "decrypt"]);
+					const params = aesParams(variant, iv);
+					const buf = await crypto.subtle.decrypt(params, cryptoKey, cipher);
+					setOutput(encodeOut(new Uint8Array(buf)));
+				}
+			}
+		} catch (e: any) {
+			if (e?.name === "OperationError") setError("操作失败：密钥、IV/Nonce 或密文不正确（GCM 还会校验认证标签）");
+			else setError(e?.message ? `⚠️ ${e.message}` : "⚠️ 操作失败");
+		}
+		setBusy(false);
+	};
+
+	return (
+		<div>
+			<div className="mb-3">
+				<p className="text-xs text-gray-400 mb-1">操作</p>
+				<div className="flex gap-2">
+					<button onClick={() => switchMode("encrypt")} className={segBtn(mode === "encrypt")}>加密</button>
+					<button onClick={() => switchMode("decrypt")} className={segBtn(mode === "decrypt")}>解密</button>
+				</div>
+			</div>
+			<div className="mb-3">
+				<p className="text-xs text-gray-400 mb-1">算法模式</p>
+				<div className="flex gap-2">
+					{(["AES-ECB", "AES-CBC", "AES-GCM", "AES-CTR"] as const).map((v) => (
+						<button key={v} onClick={() => setVariant(v)} className={segBtn(variant === v)}>{v.replace("AES-", "")}</button>
+					))}
+				</div>
+			</div>
+			<div className="mb-3">
+				<p className="text-xs text-gray-400 mb-1">密钥长度</p>
+				<div className="flex gap-2">
+					{([128, 192, 256] as const).map((b) => (
+						<button key={b} onClick={() => setBits(b)} className={segBtn(bits === b)}>{b} bit</button>
+					))}
+				</div>
+			</div>
+			<div className="mb-3">
+				<p className="text-xs text-gray-400 mb-1">密钥格式</p>
+				<div className="flex gap-2">
+					{(["utf8", "base64", "hex"] as const).map((f) => (
+						<button key={f} onClick={() => setKeyFmt(f)} className={segBtn(keyFmt === f)}>{f === "utf8" ? "UTF-8 文本" : f.toUpperCase()}</button>
+					))}
+				</div>
+			</div>
+			<div className="mb-3">
+				<p className="text-xs text-gray-400 mb-1">密钥{keyFmt === "utf8" ? `（恰好 ${bits / 8} 字节）` : `（${bits} bit）`}</p>
+				<div className="flex gap-2">
+					<input value={keyText} onChange={(e) => setKeyText(e.target.value)} className="input-area flex-1" placeholder={keyFmt === "utf8" ? `输入 ${bits / 8} 字节密钥` : `输入 ${bits} bit 密钥（${keyFmt}）`} />
+					<button onClick={genKey} className="px-3 rounded-lg text-sm bg-white/10 text-gray-300 hover:bg-white/20 whitespace-nowrap">🎲 随机密钥</button>
+				</div>
+			</div>
+			{!isEcb && (
+				<div className="mb-3">
+					<p className="text-xs text-gray-400 mb-1">IV / Nonce（{ivLen} 字节，{keyFmt === "utf8" ? "UTF-8 文本" : keyFmt.toUpperCase()} 格式）</p>
+					<div className="flex gap-2">
+						<input value={ivText} onChange={(e) => setIvText(e.target.value)} className="input-area flex-1" placeholder={`输入 ${ivLen} 字节 IV/Nonce`} />
+						<button onClick={genIv} className="px-3 rounded-lg text-sm bg-white/10 text-gray-300 hover:bg-white/20 whitespace-nowrap">🎲 随机 IV</button>
+					</div>
+				</div>
+			)}
+			<div className="mb-4">
+				<p className="text-xs text-gray-400 mb-1">输入格式</p>
+				<div className="flex gap-2">
+					{(mode === "encrypt" ? (["text", "base64", "hex"] as const) : (["base64", "hex"] as const)).map((f) => (
+						<button key={f} onClick={() => setInFmt(f)} className={segBtn(inFmt === f)}>{f === "text" ? "UTF-8 文本" : f.toUpperCase()}</button>
+					))}
+				</div>
+			</div>
+			<div className="mb-4">
+				<p className="text-xs text-gray-400 mb-1">输出格式</p>
+				<div className="flex gap-2">
+					{(mode === "encrypt" ? (["base64", "hex"] as const) : (["text", "base64", "hex"] as const)).map((f) => (
+						<button key={f} onClick={() => setOutFmt(f)} className={segBtn(outFmt === f)}>{f === "text" ? "UTF-8 文本" : f.toUpperCase()}</button>
+					))}
+				</div>
+			</div>
+			<textarea value={input} onChange={(e) => setInput(e.target.value)} className="input-area" rows={4} placeholder={mode === "encrypt" ? (inFmt === "text" ? "输入明文..." : `输入明文（${inFmt.toUpperCase()}）...`) : `输入密文（${inFmt.toUpperCase()}）...`} />
+			<button onClick={run} disabled={busy} className="btn-primary w-full my-4">{busy ? "处理中..." : mode === "encrypt" ? "🔒 加密" : "🔓 解密"}</button>
+			{error && <p className="text-red-500 text-sm mb-2">{error}</p>}
+			{output && <ResultBox value={output} />}
+			<p className={`text-xs mt-3 leading-relaxed ${isEcb ? "text-amber-500/90" : "text-gray-500"}`}>
+				{isEcb
+					? "⚠️ ECB 无 IV，相同明文块会产生相同密文块，会泄露数据规律（如加密图片可见轮廓），仅用于兼容旧协议/测试，请勿用于新系统。所有模式统一使用 PKCS#7 填充。"
+					: "说明：CBC 使用 PKCS#7 填充；GCM 为认证加密，128 bit Tag 附在密文尾部，篡改即解密失败；CTR 计数器为 128 bit。IV/Nonce 可随密文公开，但切勿在同一密钥下重复使用。"}
+			</p>
+		</div>
+	);
+}
+
 // ---- MD5 (pure JS) ----
 function md5(data: Uint8Array): string {
 	const K = [0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391];
@@ -545,7 +912,7 @@ function sha3(data: Uint8Array, bits: number): string {
 }
 
 // ---- Page Map & App ----
-const pageMap: Record<Tool, () => JSX.Element> = { uuid: UuidPage, base64: Base64Page, base32: Base32Page, hex: HexPage, url: UrlPage, hash: HashPage, jwt: JwtPage, qrcode: QrCodePage, randomkey: RandomKeyPage };
+const pageMap: Record<Tool, () => JSX.Element> = { uuid: UuidPage, base64: Base64Page, base32: Base32Page, hex: HexPage, url: UrlPage, hash: HashPage, jwt: JwtPage, qrcode: QrCodePage, randomkey: RandomKeyPage, aes: AesPage };
 
 function App() {
 	const [active, setActive] = useState<Tool | null>(null);
